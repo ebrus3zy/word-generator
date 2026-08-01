@@ -2,10 +2,10 @@ import secrets
 import streamlit as st
 
 # Configuration
-ENTROPY_BYTES = 17          # 136 bits → take first 132 bits (12 × 11)
 BITS_PER_WORD = 11
 TARGET_WORDS = 12
-MIN_WORDLIST_SIZE = 1 << BITS_PER_WORD  # 2048
+EXACT_WORDLIST_SIZE = 1 << BITS_PER_WORD  # Exactly 2048 words
+ENTROPY_BYTES = 17  # 136 bits -> slice first 132 bits (12 * 11)
 
 st.set_page_config(
     page_title="128-Bit CSPRNG Generator",
@@ -24,7 +24,7 @@ if "current_output" not in st.session_state:
 # ------------------------------------------------------------------------------
 # UI Layout
 # ------------------------------------------------------------------------------
-st.title("🔐 128-Bit Generator with History")
+st.title("🔐 Zero-Bias 128-Bit Generator")
 
 st.warning(
     "⚠️ **Run this locally / offline only.** This tool generates secret key material. "
@@ -32,32 +32,41 @@ st.warning(
 )
 
 raw_text = st.text_area(
-    f"Word List (Requires {MIN_WORDLIST_SIZE} unique words for full 128-bit security):",
+    f"Word List (Requires EXACTLY {EXACT_WORDLIST_SIZE} unique words for zero bias):",
     height=150,
-    placeholder="Enter your words here...",
+    placeholder="Enter your 2,048 words here...",
 )
 
-words = list(
-    dict.fromkeys(
-        w.strip().lower()
-        for w in raw_text.replace(",", " ").split()
-        if w.strip()
-    )
-)
-word_count = len(words)
+# Parse raw words preserving exact input order
+parsed_words = [
+    w.strip().lower()
+    for w in raw_text.replace(",", " ").split()
+    if w.strip()
+]
 
-# Status Checks
-if word_count > 0:
-    if word_count < MIN_WORDLIST_SIZE:
+total_parsed = len(parsed_words)
+unique_words = set(parsed_words)
+has_duplicates = len(parsed_words) != len(unique_words)
+
+# Status & Bias Checks
+is_valid_pool = False
+
+if total_parsed > 0:
+    if has_duplicates:
+        st.error(
+            f"❌ **Duplicate Words Detected:** Input contains {total_parsed} words, "
+            f"but only {len(unique_words)} are unique. Remove duplicates to avoid order skew."
+        )
+    elif total_parsed != EXACT_WORDLIST_SIZE:
         st.warning(
-            f"Current pool: **{word_count}** words. "
-            f"You need **{MIN_WORDLIST_SIZE} unique words** for true 128-bit security "
-            f"(no modulo bias)."
+            f"⚠️ **Word Count Mismatch:** Provided **{total_parsed}** words. "
+            f"You need **exactly {EXACT_WORDLIST_SIZE} unique words** to guarantee zero selection/truncation bias."
         )
     else:
+        is_valid_pool = True
         st.success(
-            f"Pool size verified: **{word_count}** words "
-            f"(≥ {BITS_PER_WORD} bits/word, zero bias)."
+            f"✅ **Zero-Bias Pool Verified:** Exactly **{EXACT_WORDLIST_SIZE}** unique words loaded. "
+            f"1:1 uniform mapping active."
         )
 
 # Action Buttons Area
@@ -65,7 +74,10 @@ col_gen, col_h1, col_h2 = st.columns([2, 1, 1])
 
 with col_gen:
     generate_btn = st.button(
-        "🎲 Generate New 12 Words", type="primary", use_container_width=True
+        "🎲 Generate New 12 Words", 
+        type="primary", 
+        use_container_width=True,
+        disabled=not is_valid_pool
     )
 
 with col_h1:
@@ -81,31 +93,26 @@ with col_h2:
 # ------------------------------------------------------------------------------
 # Generation Logic
 # ------------------------------------------------------------------------------
-if generate_btn:
-    if word_count < MIN_WORDLIST_SIZE:
-        st.error(
-            f"Cannot generate securely: need at least {MIN_WORDLIST_SIZE} unique words. "
-            "Using fewer words (or applying modulo) introduces bias and reduces entropy."
-        )
-    else:
-        # Cryptographically secure entropy
-        raw_bytes = secrets.token_bytes(ENTROPY_BYTES)
-        bit_string = bin(int.from_bytes(raw_bytes, "big"))[2:].zfill(ENTROPY_BYTES * 8)
+if generate_btn and is_valid_pool:
+    # 1. Cryptographically secure entropy stream
+    raw_bytes = secrets.token_bytes(ENTROPY_BYTES)
+    bit_string = bin(int.from_bytes(raw_bytes, "big"))[2:].zfill(ENTROPY_BYTES * 8)
 
-        selected_words = []
-        for i in range(TARGET_WORDS):
-            chunk = bit_string[i * BITS_PER_WORD : (i + 1) * BITS_PER_WORD]
-            idx = int(chunk, 2)               # 0–2047, direct mapping, no modulo
-            selected_words.append(words[idx])
+    # 2. Slice exact 11-bit chunks -> 0 to 2047 index range
+    selected_words = []
+    for i in range(TARGET_WORDS):
+        chunk = bit_string[i * BITS_PER_WORD : (i + 1) * BITS_PER_WORD]
+        idx = int(chunk, 2)  # Strict range 0..2047, perfectly uniform
+        selected_words.append(parsed_words[idx])
 
-        new_phrase = " ".join(selected_words)
+    new_phrase = " ".join(selected_words)
 
-        # Keep last 10 generations
-        st.session_state.history.append(new_phrase)
-        if len(st.session_state.history) > 10:
-            st.session_state.history.pop(0)
+    # Keep last 10 generations
+    st.session_state.history.append(new_phrase)
+    if len(st.session_state.history) > 10:
+        st.session_state.history.pop(0)
 
-        st.session_state.current_output = new_phrase
+    st.session_state.current_output = new_phrase
 
 # ------------------------------------------------------------------------------
 # Results & History Inspection
@@ -115,8 +122,8 @@ if st.session_state.current_output:
     st.code(st.session_state.current_output, language=None)
     st.caption("Tip: Click the copy icon in the top right of the box above.")
     st.info(
-        "Entropy source: OS CSPRNG (`secrets.token_bytes`). "
-        "Each 11-bit index maps 1:1 onto a word — no modulo reduction, no bias."
+        "🔒 **Zero-Bias Mathematical Guarantee:** OS CSPRNG (`secrets.token_bytes`) -> "
+        "11-bit chunks map 1:1 onto 2,048 indices ($P(x) = \\frac{1}{2048}$). No modulo, no truncation."
     )
 
 # Sidebar History Log
